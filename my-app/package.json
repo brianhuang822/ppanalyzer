@@ -11,6 +11,7 @@
     "react-scripts": "4.0.2",
     "web-vitals": "^1.0.1"
   },
+    "homepage": "https://brianhuang822.github.io/ppanalyzer/",
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",

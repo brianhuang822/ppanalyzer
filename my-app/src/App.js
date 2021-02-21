@@ -4,7 +4,7 @@ function App() {
   const [list, setList] = useState([]);
   const [value, setValue] = useState("1");
   useEffect(() => {
-    let strippedValue = parseInt(value.replace(/[^\d.-]/g, ''));
+    let strippedValue = parseInt(value.replace(/\D/g, ''));
     let toSet = ranks[Math.min(Math.max(0, strippedValue - strippedValue % 100), 29900)];
     if (toSet) {
       setList(toSet);

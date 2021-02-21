@@ -4,7 +4,7 @@ function App() {
   const [list, setList] = useState([]);
   const [value, setValue] = useState(1);
   useEffect(() => {
-      let toSet = ranks[Math.min(Math.max(0, value - value % 100), 30000)];
+      let toSet = ranks[Math.min(Math.max(0, value - value % 100), 29900)];
       if (toSet){
         setList(toSet);
       }

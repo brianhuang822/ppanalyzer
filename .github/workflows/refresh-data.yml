@@ -1,0 +1,81 @@
+name: Refresh data
+
+# Pulls every ranked player's top plays from ScoreSaber and BeatLeader, publishes the snapshot
+# as assets of the rolling "data-latest" release, then redeploys the site with it.
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+    inputs:
+      sources:
+        description: Which leaderboards to refresh
+        type: choice
+        options: [both, scoresaber, beatleader]
+        default: both
+      max_rank:
+        description: Fetch players ranked 1..max_rank
+        default: "30000"
+      scores:
+        description: Top plays per player
+        default: "100"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: refresh-data
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: data-latest
+
+jobs:
+  release:
+    name: Ensure release exists
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --title "Latest data snapshot" --latest=false \
+            --notes "Rolling snapshot written by the Refresh data workflow. site-data-*.tar.gz is what the website serves; raw-*.tar.gz holds every player's top plays (JSON Lines) for your own analysis."
+
+  fetch:
+    name: Fetch ${{ matrix.source }}
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        source: ${{ fromJSON((inputs.sources || 'both') == 'both' && '["scoresaber","beatleader"]' || format('["{0}"]', inputs.sources)) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install ./pipeline
+      - name: Fetch players and top plays
+        run: >
+          python -m ppanalyzer fetch --source ${{ matrix.source }} --out raw/${{ matrix.source }}
+          --max-rank ${{ inputs.max_rank || '30000' }} --scores ${{ inputs.scores || '100' }}
+      - name: Build site data
+        run: python -m ppanalyzer build --raw raw/${{ matrix.source }} --out site-data/${{ matrix.source }}
+      - name: Publish to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tar -czf site-data-${{ matrix.source }}.tar.gz -C site-data ${{ matrix.source }}
+          tar -czf raw-${{ matrix.source }}.tar.gz -C raw ${{ matrix.source }}
+          gh release upload "$RELEASE_TAG" site-data-${{ matrix.source }}.tar.gz raw-${{ matrix.source }}.tar.gz --clobber
+
+  deploy:
+    name: Deploy site
+    needs: fetch
+    # Deploy whatever refreshed; a failed source keeps its previous snapshot in the release.
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/deploy-pages.yml

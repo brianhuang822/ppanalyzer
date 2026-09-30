@@ -1,3 +1,15 @@
-venv
-.idea
-pickles
+# Python
+__pycache__/
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Pipeline output (published as release assets by the Refresh data workflow)
+raw/
+site-data/
+
+# Editors
+.idea/
+.vscode/

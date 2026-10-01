@@ -4,8 +4,9 @@ import pytest
 
 from ppanalyzer.build import build_from_records, build_site_data, fnv1a32, shard_of, write_sources_index
 from ppanalyzer.cli import main
-from ppanalyzer.fetch import fetch_snapshot, load_players
-from ppanalyzer.models import MapInfo, PlayerRecord
+from ppanalyzer.fetch import fetch_snapshot, load_players, merge_snapshots
+from ppanalyzer.models import MapInfo, PlayerRecord, TopPlays
+from ppanalyzer.sample import generate_sample
 
 
 def make_map(map_id: str, key: str | None = "1") -> MapInfo:
@@ -23,18 +24,18 @@ class FakeSource:
         self.fail = set(fail)
         self.fetched = []
 
-    def iter_players(self, max_rank):
+    def iter_players(self, max_rank, min_rank=1):
         for player in self.players:
-            if player.rank <= max_rank:
+            if min_rank <= player.rank <= max_rank:
                 yield PlayerRecord(player.id, player.name, player.country, player.rank, player.pp)
 
     def fetch_top_scores(self, player_id, count):
         self.fetched.append(player_id)
         if player_id in self.fail:
             raise RuntimeError("boom")
-        rows = self.scores[player_id][:count]
+        rows = self.scores[player_id]
         weights = [0.965 ** i for i in range(len(rows))]
-        return rows, [make_map(r[0]) for r in rows], weights
+        return TopPlays(rows, [make_map(r[0]) for r in rows], weights, complete=True).truncated(count)
 
     def realm_info(self):
         return {"realm": "Main", "advertisedDecay": 0.965}
@@ -48,18 +49,17 @@ def test_fetch_writes_snapshot_and_resumes(tmp_path):
     players = roster(5)
     scores = {p.id: [["m1", 300.0, 0.95], ["m2", 250.0, 0.94], ["m3", 200.0, 0.93]] for p in players}
     source = FakeSource(players, scores, fail={"3"})
-    meta = fetch_snapshot(source, tmp_path, max_rank=4, scores_per_player=2, workers=2,
-                          resolve_beatsaver=False)
+    meta = fetch_snapshot(source, tmp_path, max_rank=4, scores_per_player=2, workers=2)
     saved = load_players(tmp_path / "players.jsonl")
     assert sorted(p.id for p in saved) == ["1", "2", "4"]
-    assert all(len(p.scores) == 2 for p in saved)
+    assert all(len(p.scores) == 2 and not p.complete for p in saved)  # 3 plays cut to 2
     assert meta["failedPlayers"] == ["3"] and meta["decay"] == pytest.approx(0.965)
     maps = [json.loads(line)["id"] for line in (tmp_path / "leaderboards.jsonl").read_text().splitlines()]
     assert sorted(maps) == ["m1", "m2"]
 
     # A second run only fetches what is missing.
     source2 = FakeSource(players, scores)
-    fetch_snapshot(source2, tmp_path, max_rank=4, scores_per_player=2, workers=2, resolve_beatsaver=False)
+    fetch_snapshot(source2, tmp_path, max_rank=4, scores_per_player=2, workers=2)
     assert source2.fetched == ["3"]
     assert len(load_players(tmp_path / "players.jsonl")) == 4
 
@@ -69,7 +69,7 @@ def test_fetch_aborts_when_too_many_fail(tmp_path):
     scores = {p.id: [["m1", 1.0, 0.9]] for p in players}
     source = FakeSource(players, scores, fail={str(i) for i in range(1, 13)})
     with pytest.raises(RuntimeError):
-        fetch_snapshot(source, tmp_path, 100, 1, resolve_beatsaver=False)
+        fetch_snapshot(source, tmp_path, 100, 1)
     assert not (tmp_path / "meta.json").exists()
 
 
@@ -102,10 +102,13 @@ def test_build_buckets_use_actual_rank(tmp_path):
     b1 = json.loads((out / "buckets" / "1.json").read_text())
     assert (b0["players"], b0["minRank"], b0["maxRank"]) == (3, 1, 100)
     assert (b1["players"], b1["minRank"], b1["maxRank"]) == (1, 101, 101)
+    assert b0["fields"] == ["map", "count", "weight", "ppSum", "accSum", "residSum", "recent"]
     rows0 = {ids[r[0]]: r[1:] for r in b0["rows"]}
-    assert rows0["a"] == [2, pytest.approx(2.0), 780.0, pytest.approx(1.915)]
-    assert rows0["b"] == [2, pytest.approx(1.9), 550.0, pytest.approx(1.89)]
+    assert rows0["a"][:4] == [2, pytest.approx(2.0), 780.0, pytest.approx(1.915)]
+    assert rows0["b"][:4] == [2, pytest.approx(1.9), 550.0, pytest.approx(1.89)]
+    assert rows0["a"][5] == 0  # these rows carry no timestamps, so nothing is "recent"
     assert {ids[r[0]] for r in b1["rows"]} == {"c"}
+    assert b0["typical"][0] == 380.0  # median best play of the three players
 
     shard = shard_of("p101", 4)
     players_json = json.loads((out / "players" / f"{shard}.json").read_text())
@@ -136,14 +139,41 @@ def test_sources_index_orders_known_sources_first(tmp_path):
 def test_cli_sample_then_build(tmp_path):
     raw = tmp_path / "raw"
     site = tmp_path / "site"
-    assert main(["sample", "--out", str(raw), "--players", "300", "--maps", "120"]) == 0
+    assert main(["sample", "--out", str(raw), "--players", "300", "--maps", "120", "--scores", "150"]) == 0
     assert main(["build", "--raw", str(raw), "--out", str(site / "sample"), "--shards", "8"]) == 0
     meta = json.loads((site / "sample" / "meta.json").read_text())
     assert meta["sample"] is True and meta["playerCount"] == 300 and meta["bucketCount"] == 3
     assert meta["minRank"] == 1 and meta["maxRank"] == 300
     assert len(list((site / "sample" / "players").glob("*.json"))) == 9  # 8 shards + index
-    # Deterministic: same seed, same data.
-    raw2 = tmp_path / "raw2"
-    main(["sample", "--out", str(raw2), "--players", "300", "--maps", "120"])
-    assert (raw / "players.jsonl").read_text() == (raw2 / "players.jsonl").read_text()
-    build_site_data(raw2, site / "sample2", shard_count=8)
+    assert meta["ppCurveFitted"] is True and meta["recentDays"] == 30
+    build_site_data(raw, site / "sample2", shard_count=8)
+
+
+def test_sample_is_deterministic(tmp_path):
+    for name in ["a", "b"]:
+        generate_sample(tmp_path / name, players=100, maps=60, fetched_at="2026-01-01T00:00:00Z")
+    assert (tmp_path / "a" / "players.jsonl").read_text() == (tmp_path / "b" / "players.jsonl").read_text()
+
+
+def test_merge_parts(tmp_path):
+    maps = {"m1": make_map("m1"), "m2": make_map("m2", key=None)}
+    for name, players, decay in [("p1", roster(3), 0.965), ("p2", roster(5)[2:], 0.964)]:
+        part = tmp_path / name
+        part.mkdir()
+        with (part / "players.jsonl").open("w") as fh:
+            for p in players:
+                p.scores = [["m1", 100.0, 0.9, 0]]
+                fh.write(json.dumps(p.to_json()) + "\n")
+        with (part / "leaderboards.jsonl").open("w") as fh:
+            for info in maps.values():
+                fh.write(json.dumps(info.to_json()) + "\n")
+        (part / "meta.json").write_text(json.dumps({
+            "source": "fake", "label": "Fake", "decay": decay, "minRank": players[0].rank,
+            "maxRank": players[-1].rank, "fetchedAt": f"2026-01-0{len(name)}T00:00:00Z",
+            "weightSamples": []}))
+    # Player 3 is in both parts (ranks shifted); keep one copy.
+    meta = merge_snapshots([tmp_path / "p1", tmp_path / "p2"], tmp_path / "out")
+    merged = load_players(tmp_path / "out" / "players.jsonl")
+    assert [p.rank for p in merged] == [1, 2, 3, 4, 5]
+    assert (meta["playerCount"], meta["minRank"], meta["maxRank"], meta["parts"]) == (5, 1, 5, 2)
+    assert meta["decay"] == pytest.approx(0.9645)

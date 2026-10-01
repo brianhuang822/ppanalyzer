@@ -2,7 +2,7 @@
 
 Endpoints used:
   GET /players?page&count&sortBy=pp&order=desc                      ranking (10 req / 10 s)
-  GET /player/{id}/scores?sortBy=pp&order=desc&count=100&type=ranked top plays (50 req / 10 s)
+  GET /player/{id}/scores?sortBy=pp&order=desc&count=100&type=ranked ranked plays (50 req / 10 s)
 """
 
 from __future__ import annotations
@@ -13,10 +13,12 @@ from ..http import HttpClient
 from ..models import (
     MapInfo,
     PlayerRecord,
+    TopPlays,
     normalize_accuracy,
     normalize_difficulty,
     normalize_key,
     normalize_mode,
+    parse_timestamp,
 )
 
 BASE_URL = "https://api.beatleader.com"
@@ -44,6 +46,8 @@ def parse_leaderboard(board: dict) -> MapInfo | None:
         mode=normalize_mode(difficulty.get("modeName")),
         stars=float(difficulty.get("stars") or 0.0),
         cover=song.get("coverImage", "") or "",
+        ranked_at=parse_timestamp(difficulty.get("rankedTime")) or None,
+        duration=float(song["duration"]) if song.get("duration") else None,
     )
 
 
@@ -58,7 +62,8 @@ def parse_score(item: dict) -> tuple[list, MapInfo, float] | None:
     if info is None:
         return None
     acc = normalize_accuracy(item.get("accuracy"))
-    return [info.id, round(pp, 2), round(acc, 5)], info, float(item.get("weight") or 0.0)
+    set_at = parse_timestamp(item.get("timepost")) or parse_timestamp(item.get("timeset"))
+    return [info.id, round(pp, 2), round(acc, 5), set_at], info, float(item.get("weight") or 0.0)
 
 
 def parse_player(item: dict) -> PlayerRecord | None:
@@ -83,15 +88,16 @@ class BeatLeaderSource:
         self.http = http or HttpClient(BASE_URL, rate_per_second=4.0)
         self.players_http = players_http or HttpClient(BASE_URL, rate_per_second=0.9)
 
-    def iter_players(self, max_rank: int) -> Iterator[PlayerRecord]:
-        page = 1
+    def iter_players(self, max_rank: int, min_rank: int = 1) -> Iterator[PlayerRecord]:
+        # Sorted by pp, i.e. by rank: jump straight to the page holding min_rank.
+        page = max(1, (min_rank - 1) // PAGE_SIZE + 1)
         while True:
             body = self.players_http.get_json("players", {"page": page, "count": PAGE_SIZE,
                                                           "sortBy": "pp", "order": "desc"})
             data = body.get("data") or []
             for item in data:
                 player = parse_player(item)
-                if player is None:
+                if player is None or player.rank < min_rank:
                     continue
                 if player.rank > max_rank:
                     return
@@ -102,35 +108,36 @@ class BeatLeaderSource:
                 return
             page += 1
 
-    def fetch_top_scores(self, player_id: str, count: int) -> tuple[list[list], list[MapInfo], list[float]]:
-        rows: list[list] = []
-        maps: list[MapInfo] = []
-        weights: list[float] = []
+    def fetch_top_scores(self, player_id: str, count: int) -> TopPlays:
+        plays = TopPlays([], [], [], complete=False)
         # Keep the page size fixed: servers compute the offset as (page - 1) * limit.
         limit = min(PAGE_SIZE, count)
         page = 1
-        while len(rows) < count:
+        while len(plays.rows) < count:
             body = self.http.get_json(f"player/{player_id}/scores",
                                       {"sortBy": "pp", "order": "desc", "count": limit, "page": page,
                                        "type": "ranked"}, allow_404=True)
             if not body:
+                plays.complete = True
                 break
             data = body.get("data") or []
             for item in data:
                 if float(item.get("pp") or 0.0) <= 0:
-                    # Top plays are sorted by pp: the first 0pp play ends the ranked list.
-                    return rows, maps, weights
+                    # Plays are sorted by pp: the first 0pp play ends the ranked list.
+                    plays.complete = True
+                    return plays.truncated(count)
                 parsed = parse_score(item)
                 if parsed is None:
                     continue
                 row, info, weight = parsed
-                rows.append(row)
-                maps.append(info)
-                weights.append(weight)
+                plays.rows.append(row)
+                plays.maps.append(info)
+                plays.weights.append(weight)
             if len(data) < limit:
+                plays.complete = True
                 break
             page += 1
-        return rows[:count], maps[:count], weights[:count]
+        return plays.truncated(count)
 
     def realm_info(self) -> dict:
         return {"realm": "General"}

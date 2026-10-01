@@ -1,4 +1,5 @@
-"""fetch -> build through the real HTTP client, thread pool and BeatSaver lookups (mocked servers)."""
+"""fetch (in two rank-range parts) -> merge -> enrich -> build through the real HTTP client,
+thread pool and BeatSaver lookups, against mocked servers."""
 
 import json
 import re
@@ -8,7 +9,7 @@ from conftest import page, ss_player, ss_score
 
 from ppanalyzer import beatsaver
 from ppanalyzer.build import build_site_data
-from ppanalyzer.fetch import fetch_snapshot
+from ppanalyzer.fetch import enrich_snapshot, fetch_snapshot, load_maps, merge_snapshots
 from ppanalyzer.http import HttpClient
 from ppanalyzer.sources.scoresaber import BASE_URL, ScoreSaberSource
 
@@ -23,6 +24,7 @@ def test_scoresaber_fetch_then_build(tmp_path, monkeypatch):
 
     responses.get(f"{BASE_URL}/players", match=listing(1), json=page(players[:100], 1, 2))
     responses.get(f"{BASE_URL}/players", match=listing(2), json=page(players[100:], 2, 2))
+    responses.get(f"{BASE_URL}/players", match=listing(1), json=page(players[:100], 1, 2))
 
     def scores(request):
         player_id = int(re.search(r"/players/(\d+)/scores", request.url).group(1))
@@ -37,15 +39,31 @@ def test_scoresaber_fetch_then_build(tmp_path, monkeypatch):
     responses.add_callback(responses.GET, re.compile(rf"{re.escape(BASE_URL)}/players/\d+/scores.*"),
                            callback=scores)
     responses.get(f"{BASE_URL}/realms", json=[{"id": 1, "name": "Main", "decayFactor": 0.965}])
-    responses.get(re.compile(rf"{re.escape(beatsaver.BASE_URL)}/maps/hash/.*"), json={"id": "3C"})
+    def beatsaver_lookup(request):
+        hashes = request.url.rsplit("/", 1)[1].split(",")
+        docs = {h: {"id": "3C" if h == f"{3:040x}" else "2a1b", "metadata": {"duration": 150 + i},
+                    "tags": ["speed"], "versions": []} for i, h in enumerate(hashes)}
+        return 200, {}, json.dumps(docs)
+
+    responses.add_callback(responses.GET, re.compile(rf"{re.escape(beatsaver.BASE_URL)}/maps/hash/.*"),
+                           callback=beatsaver_lookup)
     monkeypatch.setattr(beatsaver, "HttpClient",
                         lambda base, **kw: HttpClient(base, rate_per_second=0, sleep=lambda _s: None))
 
-    source = ScoreSaberSource(HttpClient(BASE_URL, rate_per_second=0, sleep=lambda _s: None))
+    def source():
+        return ScoreSaberSource(HttpClient(BASE_URL, rate_per_second=0, sleep=lambda _s: None))
+
+    first = fetch_snapshot(source(), tmp_path / "part1", max_rank=70, scores_per_player=100, workers=4)
+    second = fetch_snapshot(source(), tmp_path / "part2", max_rank=140, scores_per_player=100, workers=4,
+                            min_rank=71)
+    assert (first["playerCount"], second["playerCount"]) == (70, 70)
     raw = tmp_path / "raw"
-    meta = fetch_snapshot(source, raw, max_rank=140, scores_per_player=100, workers=4)
+    meta = merge_snapshots([tmp_path / "part1", tmp_path / "part2"], raw)
     assert meta["playerCount"] == 140 and meta["mapCount"] == 3
-    assert meta["realm"] == "Main" and meta["decay"] == 0.965 and meta["resolvedKeys"] == 1
+    assert meta["realm"] == "Main" and meta["decay"] == 0.965
+    assert enrich_snapshot(raw) == 3
+    durations = {m: info.duration for m, info in load_maps(raw / "leaderboards.jsonl").items()}
+    assert all(durations.values())
 
     site = build_site_data(raw, tmp_path / "site" / "scoresaber", shard_count=8)
     assert site["bucketCount"] == 2 and site["maxRank"] == 140

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { difficultyLabel, formatPP } from './format'
+import { difficultyLabel, formatDuration, formatPP, formatSignedPercent } from './format'
 import { beatSaverUrl, downloadUrl, leaderboardUrl, oneClickUrl, previewUrl, profileUrl } from './links'
+import { normalizeBucket, parseMaps } from './parse'
 import { buildPlaylist, playlistFileName } from './playlist'
 import { gainFromPlay, weightedTotal } from './pp'
 import { parseQuery } from './query'
@@ -119,17 +120,31 @@ describe('playlist', () => {
 describe('url state', () => {
   it('round-trips and ignores junk', () => {
     const state = { ...DEFAULT_STATE, source: 'beatleader', q: '123', width: 250, mode: 'above' as const,
-      sort: 'specific' as const, hidePlayed: false, minStars: 6, maxStars: 10.5 }
+      sort: 'overweight' as const, played: 'improve' as const, minStars: 6, maxStars: 10.5, tag: 'tech' }
     expect(readState(writeState(state))).toEqual(state)
     expect(writeState(DEFAULT_STATE)).toBe('')
-    expect(readState('?w=7&sort=nope&min=x')).toEqual(DEFAULT_STATE)
+    expect(readState('?w=7&sort=gain&maps=nope&min=x')).toEqual(DEFAULT_STATE)
   })
 })
 
 describe('format', () => {
-  it('labels difficulties and pp', () => {
+  it('labels difficulties, pp, durations and signed percentages', () => {
     expect(difficultyLabel('ExpertPlus', 'Standard')).toBe('Expert+')
     expect(difficultyLabel('Hard', 'OneSaber')).toBe('Hard (OneSaber)')
     expect(formatPP(1234.56)).toBe('1,234.6pp')
+    expect(formatDuration(185.4)).toBe('3:05')
+    expect(formatDuration(null)).toBeNull()
+    expect(formatSignedPercent(0.123)).toBe('+12.3%')
+    expect(formatSignedPercent(-0.004, 2)).toBe('-0.40%')
+  })
+})
+
+describe('parse', () => {
+  it('reads map rows by field name and pads old bucket files', () => {
+    const [map] = parseMaps({ fields: ['id', 'stars', 'tags', 'duration'], rows: [['7', 5.5, ['tech'], 120]] })
+    expect(map).toMatchObject({ index: 0, id: '7', stars: 5.5, tags: ['tech'], duration: 120, ppScale: null, mods: [] })
+    const bucket = normalizeBucket({ bucket: 3, players: 10, rows: [[1, 2, 3, 4, 5]] })
+    expect(bucket.rows[0]).toEqual([1, 2, 3, 4, 5, 0, 0])
+    expect(bucket.accCurve).toEqual([])
   })
 })

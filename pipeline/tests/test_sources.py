@@ -33,8 +33,12 @@ def test_scoresaber_top_scores(no_sleep_client):
         ss_score(4, 0.0),  # first unranked play ends the list
         ss_score(5, 0.0),
     ], 1, 1))
-    rows, maps, weights = ScoreSaberSource(no_sleep_client(SS)).fetch_top_scores("42", 100)
-    assert rows == [["1", 400.5, 0.961], ["3", 380.0, 0.955]]
+    plays = ScoreSaberSource(no_sleep_client(SS)).fetch_top_scores("42", 100)
+    rows, maps, weights = plays.rows, plays.maps, plays.weights
+    set_at = 1740787200  # 2025-03-01T00:00:00Z
+    assert rows == [["1", 400.5, 0.961, set_at], ["3", 380.0, 0.955, set_at]]
+    assert plays.complete  # the list ended at a 0pp play
+    assert maps[0].ranked_at == 1735776000  # 2025-01-02T00:00:00Z
     assert weights == [1.0, 0.931225]
     first, third = maps
     assert first.key == "2a1b" and first.difficulty == "ExpertPlus" and first.mode == "Standard"
@@ -52,14 +56,25 @@ def test_scoresaber_top_scores_paginates_beyond_100(no_sleep_client):
     responses.get(f"{SS}/players/7/scores", match=[matchers.query_param_matcher(
         {"sort": "top", "limit": "100", "page": "2"})],
         json=page([ss_score(i, 500 - i) for i in range(101, 201)], 2, 3))
-    rows, _, _ = ScoreSaberSource(no_sleep_client(SS)).fetch_top_scores("7", 120)
-    assert len(rows) == 120 and rows[-1][0] == "120"
+    plays = ScoreSaberSource(no_sleep_client(SS)).fetch_top_scores("7", 120)
+    assert len(plays.rows) == 120 and plays.rows[-1][0] == "120"
+    assert not plays.complete  # cut off at 120 of 200+
+
+
+@responses.activate
+def test_scoresaber_players_start_at_min_rank(no_sleep_client):
+    responses.get(f"{SS}/players", match=[matchers.query_param_matcher(
+        {"page": "3", "limit": "100", "sort": "rank", "sortDirection": "asc"})],
+        json=page([ss_player(str(r), r) for r in range(201, 301)], 3, 5))
+    source = ScoreSaberSource(no_sleep_client(SS))
+    assert [p.rank for p in source.iter_players(max_rank=260, min_rank=250)] == list(range(250, 261))
 
 
 @responses.activate
 def test_scoresaber_missing_player_returns_empty(no_sleep_client):
     responses.get(f"{SS}/players/404/scores", status=404)
-    assert ScoreSaberSource(no_sleep_client(SS)).fetch_top_scores("404", 100) == ([], [], [])
+    plays = ScoreSaberSource(no_sleep_client(SS)).fetch_top_scores("404", 100)
+    assert (plays.rows, plays.complete) == ([], True)
 
 
 @responses.activate
@@ -89,8 +104,10 @@ def test_beatleader_players_and_scores(no_sleep_client):
     client = no_sleep_client(BL)
     source = BeatLeaderSource(client, players_http=client)
     assert [p.id for p in source.iter_players(100)] == ["9"]
-    rows, maps, weights = source.fetch_top_scores("9", 100)
-    assert rows == [["abc91", 500.0, 0.955], ["def61", 480.0, 0.955]]
+    plays = source.fetch_top_scores("9", 100)
+    rows, maps, weights = plays.rows, plays.maps, plays.weights
+    assert rows == [["abc91", 500.0, 0.955, 1700000000], ["def61", 480.0, 0.955, 1700000000]]
+    assert plays.complete
     assert maps[0].key == "3c4d" and maps[1].key is None  # non-hex id resolved later via BeatSaver
     assert maps[0].hash == "abcdef0123456789abcdef0123456789abcdef01"
     assert maps[0].difficulty == "Expert" and maps[0].stars == 9.1

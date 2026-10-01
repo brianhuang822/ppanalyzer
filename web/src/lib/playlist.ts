@@ -5,6 +5,8 @@ export interface Playlist {
   playlistTitle: string
   playlistAuthor: string
   playlistDescription: string
+  /** syncURL lets PlaylistManager re-download the latest version from a Sync button in-game. */
+  customData?: { syncURL: string }
   songs: {
     key?: string
     hash: string
@@ -18,7 +20,7 @@ function lowerFirst(text: string): string {
   return text ? text[0].toLowerCase() + text.slice(1) : text
 }
 
-export function buildPlaylist(title: string, description: string, maps: MapInfo[]): Playlist {
+export function buildPlaylist(title: string, description: string, maps: MapInfo[], syncURL?: string): Playlist {
   const songs = new Map<string, Playlist['songs'][number]>()
   for (const map of maps) {
     if (!map.hash) continue
@@ -43,6 +45,7 @@ export function buildPlaylist(title: string, description: string, maps: MapInfo[
     playlistTitle: title,
     playlistAuthor: 'PP Analyzer',
     playlistDescription: description,
+    ...(syncURL ? { customData: { syncURL } } : {}),
     songs: [...songs.values()],
   }
 }

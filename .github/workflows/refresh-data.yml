@@ -1,7 +1,9 @@
 name: Refresh data
 
-# Pulls every ranked player's top plays from ScoreSaber and BeatLeader, publishes the snapshot
-# as assets of the rolling "data-latest" release, then redeploys the site with it.
+# Pulls ranked players' ranked plays from ScoreSaber and BeatLeader (in rank-range parts on
+# parallel runners), merges them, adds BeatSaver metadata, builds the site data, checks last
+# week's predictions against this week's scores, publishes everything as assets of the rolling
+# "data-latest" release, then redeploys the site.
 on:
   schedule:
     - cron: "17 6 * * 1" # Mondays 06:17 UTC
@@ -16,8 +18,11 @@ on:
         description: Fetch players ranked 1..max_rank
         default: "30000"
       scores:
-        description: Top plays per player
-        default: "100"
+        description: Ranked plays per player, best first (deeper = less survivorship bias, slower)
+        default: "500"
+      parts:
+        description: Rank-range parts fetched in parallel per leaderboard
+        default: "2"
 
 permissions:
   contents: write
@@ -32,6 +37,32 @@ env:
   RELEASE_TAG: data-latest
 
 jobs:
+  plan:
+    name: Plan parts
+    runs-on: ubuntu-latest
+    outputs:
+      parts: ${{ steps.plan.outputs.parts }}
+      sources: ${{ steps.plan.outputs.sources }}
+    steps:
+      - id: plan
+        env:
+          SOURCES: ${{ inputs.sources || 'both' }}
+          MAX_RANK: ${{ inputs.max_rank || '30000' }}
+          PARTS: ${{ inputs.parts || '2' }}
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, os
+          sources = ["scoresaber", "beatleader"] if os.environ["SOURCES"] == "both" else [os.environ["SOURCES"]]
+          max_rank, parts = int(os.environ["MAX_RANK"]), max(1, int(os.environ["PARTS"]))
+          include = []
+          for source in sources:
+              for part in range(parts):
+                  lo, hi = part * max_rank // parts + 1, (part + 1) * max_rank // parts
+                  include.append({"source": source, "part": part + 1, "min": lo, "max": hi})
+          print("parts=" + json.dumps({"include": include}))
+          print("sources=" + json.dumps(sources))
+          EOF
+
   release:
     name: Ensure release exists
     runs-on: ubuntu-latest
@@ -42,29 +73,88 @@ jobs:
         run: |
           gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
             --title "Latest data snapshot" --latest=false \
-            --notes "Rolling snapshot written by the Refresh data workflow. site-data-*.tar.gz is what the website serves; raw-*.tar.gz holds every player's top plays (JSON Lines) for your own analysis."
+            --notes "Rolling snapshot written by the Refresh data workflow. site-data-*.tar.gz is what the website serves; raw-*.tar.gz holds every player's ranked plays (JSON Lines) for your own analysis."
 
   fetch:
-    name: Fetch ${{ matrix.source }}
-    needs: release
+    name: Fetch ${{ matrix.source }} ranks ${{ matrix.min }}-${{ matrix.max }}
+    needs: [plan, release]
     runs-on: ubuntu-latest
     timeout-minutes: 330
     strategy:
       fail-fast: false
-      matrix:
-        source: ${{ fromJSON((inputs.sources || 'both') == 'both' && '["scoresaber","beatleader"]' || format('["{0}"]', inputs.sources)) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.parts) }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: pip install ./pipeline
-      - name: Fetch players and top plays
+      - name: Fetch players and ranked plays
         run: >
-          python -m ppanalyzer fetch --source ${{ matrix.source }} --out raw/${{ matrix.source }}
-          --max-rank ${{ inputs.max_rank || '30000' }} --scores ${{ inputs.scores || '100' }}
+          python -m ppanalyzer fetch --source ${{ matrix.source }} --out part
+          --min-rank ${{ matrix.min }} --max-rank ${{ matrix.max }} --scores ${{ inputs.scores || '500' }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: raw-${{ matrix.source }}-${{ matrix.part }}
+          path: part
+          retention-days: 3
+
+  build:
+    name: Build ${{ matrix.source }}
+    needs: [plan, fetch]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        source: ${{ fromJSON(needs.plan.outputs.sources) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: pip install ./pipeline
+      - run: npm ci
+        working-directory: web
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: raw-${{ matrix.source }}-*
+          path: parts
+      - name: Merge parts and add BeatSaver metadata
+        env:
+          PARTS: ${{ inputs.parts || '2' }}
+        run: |
+          found=$(ls -d parts/*/ | wc -l)
+          if [ "$found" -ne "$PARTS" ]; then
+            echo "::error::only $found of $PARTS parts fetched for ${{ matrix.source }}; keeping last week's data"
+            exit 1
+          fi
+          python -m ppanalyzer merge --out raw/${{ matrix.source }} parts/*/
+          python -m ppanalyzer enrich --raw raw/${{ matrix.source }}
       - name: Build site data
         run: python -m ppanalyzer build --raw raw/${{ matrix.source }} --out site-data/${{ matrix.source }}
+      - name: Check last week's predictions against this week
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p prev/raw prev/site
+          src=${{ matrix.source }}
+          if gh release download "$RELEASE_TAG" --dir prev --pattern "raw-$src.tar.gz" \
+              --pattern "site-data-$src.tar.gz" && [ -f "prev/raw-$src.tar.gz" ] && [ -f "prev/site-data-$src.tar.gz" ]; then
+            { tar -xzf "prev/raw-$src.tar.gz" -C prev/raw \
+              && tar -xzf "prev/site-data-$src.tar.gz" -C prev/site \
+              && (cd web && npx tsx scripts/backtest.ts --before-site "../prev/site/$src" \
+                --before-raw "../prev/raw/$src" --after-raw "../raw/$src" --out "../site-data/$src/backtest.json"); } \
+              || echo "::warning::backtest failed; publishing without it"
+          else
+            echo "No previous snapshot yet; the first check runs next week."
+          fi
       - name: Publish to release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -75,7 +165,7 @@ jobs:
 
   deploy:
     name: Deploy site
-    needs: fetch
+    needs: build
     # Deploy whatever refreshed; a failed source keeps its previous snapshot in the release.
     if: ${{ !cancelled() }}
     uses: ./.github/workflows/deploy-pages.yml

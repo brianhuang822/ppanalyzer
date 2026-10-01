@@ -17,20 +17,39 @@ const files: Record<string, unknown> = {
   },
   'scoresaber/maps.json': {
     fields: ['id', 'hash', 'key', 'name', 'subName', 'artist', 'mapper', 'difficulty', 'mode', 'stars', 'cover',
-      'globalCount', 'globalWeight'],
+      'globalCount', 'globalWeight', 'ppScale', 'rankedAt', 'duration', 'tags', 'njs', 'nps', 'mods'],
     rows: [
-      ['11', 'a'.repeat(40), '1a', 'Alpha', '', 'Artist A', 'Mapper A', 'ExpertPlus', 'Standard', 9.2, '', 150, 90],
-      ['22', 'b'.repeat(40), '2b', 'Bravo', '', 'Artist B', 'Mapper B', 'Expert', 'Standard', 7.4, '', 90, 40],
-      ['33', 'c'.repeat(40), null, 'Charlie', '(Remix)', 'Artist C', 'Mapper C', 'Hard', 'Standard', 5.1, '', 60, 20],
+      ['11', 'a'.repeat(40), '1a', 'Alpha', '', 'Artist A', 'Mapper A', 'ExpertPlus', 'Standard', 9.2, '', 150, 90,
+        9.2, null, 200, ['tech'], 20, 6.1, []],
+      // Bravo is overweighted: players here beat the accuracy its stars imply by ~1.2%.
+      ['22', 'b'.repeat(40), '2b', 'Bravo', '', 'Artist B', 'Mapper B', 'Expert', 'Standard', 7.4, '', 90, 40,
+        7.4, null, 150, ['accuracy'], 18, 5.2, []],
+      ['33', 'c'.repeat(40), null, 'Charlie', '(Remix)', 'Artist C', 'Mapper C', 'Hard', 'Standard', 5.1, '', 60, 20,
+        5.1, null, 180, [], 16, 4.0, []],
     ],
   },
+  // rows: [map, count, weight, ppSum, accSum, residSum, recent]
   'scoresaber/buckets/0.json': {
     bucket: 0, players: 100, minRank: 1, maxRank: 100, fields: [],
-    rows: [[0, 80, 50, 80 * 300, 80 * 0.95], [1, 50, 20, 50 * 280, 50 * 0.96], [2, 30, 10, 30 * 200, 30 * 0.97]],
+    rows: [[0, 80, 50, 80 * 360, 80 * 0.94, 0, 2], [1, 50, 20, 50 * 350, 50 * 0.966, 50 * 0.012, 12],
+      [2, 30, 10, 30 * 260, 30 * 0.97, 0, 0]],
+    accCurve: [[5.25, 0.97, 50], [7.25, 0.955, 50], [9.25, 0.94, 50]],
+    typical: [400, 380, 360, 340, 320, 300, 280, 260, 240, 220],
   },
   'scoresaber/buckets/1.json': {
     bucket: 1, players: 100, minRank: 101, maxRank: 200, fields: [],
-    rows: [[0, 70, 40, 70 * 250, 70 * 0.94], [1, 40, 20, 40 * 240, 40 * 0.95], [2, 30, 10, 30 * 190, 30 * 0.96]],
+    rows: [[0, 70, 40, 70 * 350, 70 * 0.94, 0, 1], [1, 40, 20, 40 * 340, 40 * 0.966, 40 * 0.012, 9],
+      [2, 30, 10, 30 * 250, 30 * 0.97, 0, 0]],
+    accCurve: [[5.25, 0.97, 50], [7.25, 0.955, 50], [9.25, 0.94, 50]],
+    typical: [400, 380, 360, 340, 320, 300, 280, 260, 240, 220],
+  },
+  'scoresaber/playlists/index.json': {
+    bands: [{ lo: 1, hi: 200, file: 'playlists/rank-1-200.bplist', title: 'Ranks 1-200', songs: 3 }],
+  },
+  'scoresaber/backtest.json': {
+    before: '2026-09-21T00:00:00Z', after: '2026-09-28T00:00:00Z', players: 180, newPlays: 950,
+    maeBaseline: 0.012, maeWithOverweight: 0.009, overweightCorrelation: 0.41,
+    strategies: { climb: { players: 180, hits: 360, hitRate: 0.08, gainPerHit: 9.5 } },
   },
   [`scoresaber/players/${shardOf(PLAYER, SHARDS)}.json`]: {
     fields: ['map', 'pp', 'acc'],
@@ -90,9 +109,21 @@ function mapTitles() {
 
 describe('App', () => {
   it('recommends maps for a rank with map, one-click and download links', async () => {
-    await search('150')
-    await screen.findByText(/sorted by most played at this rank/)
+    const user = await search('150')
+    await screen.findByText(/sorted by biggest pp gain \(gains shown for a typical player here/)
     expect(mapTitles()).toEqual(['Alpha', 'Bravo', 'Charlie (Remix)'])
+    expect(within(screen.getByRole('link', { name: 'Bravo' }).closest('li')!).getByText(/Overweighted \+\d+pp \(\+\d+%\)/))
+      .toBeInTheDocument()
+    expect(within(screen.getByRole('link', { name: 'Alpha' }).closest('li')!).queryByText(/Overweighted/)).toBeNull()
+
+    await user.selectOptions(screen.getByLabelText('Sort by'), 'overweight')
+    await screen.findByText(/sorted by most overweighted/)
+    expect(mapTitles()[0]).toBe('Bravo')
+    await user.selectOptions(screen.getByLabelText('Sort by'), 'trending')
+    await screen.findByText(/sorted by most set by these players in the last month/)
+    expect(mapTitles()[0]).toBe('Bravo')
+    expect(screen.getByText('🔥 21 recent')).toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Sort by'), 'climb')
 
     const alpha = screen.getByRole('link', { name: 'Alpha' })
     expect(alpha).toHaveAttribute('href', 'https://beatsaver.com/maps/1a')
@@ -109,13 +140,21 @@ describe('App', () => {
     expect(window.location.search).toBe('?q=150')
   })
 
+  it('offers the auto-updating playlist for the rank band and shows last week\'s model check', async () => {
+    await search('150')
+    const install = await screen.findByRole('link', { name: 'Install playlist' })
+    expect(install.getAttribute('href')).toMatch(/^bsplaylist:\/\/playlist\/https?:\/\/.+\/data\/scoresaber\/playlists\/rank-1-200\.bplist$/)
+    expect(screen.getByText(/Does it work\? Last week's check/)).toBeInTheDocument()
+    expect(screen.getByText(/1\.20% to 0\.90% \(25% better\)/)).toBeInTheDocument()
+  })
+
   it('falls back to the snapshot when the live API is blocked, then ranks by pp gain', async () => {
     await search(PLAYER)
     expect(await screen.findByText('Snapshot Sam')).toBeInTheDocument()
     expect(screen.getByText('snapshot')).toBeInTheDocument()
     expect(screen.getByText(/Live lookup unavailable \(the browser could not reach the live API/)).toBeInTheDocument()
-    await screen.findByText(/sorted by biggest expected pp gain/)
-    // Alpha is already played, so it is hidden by default.
+    await screen.findByText(/sorted by biggest pp gain\./)
+    // Alpha is already played, so it is hidden by default ("new to me").
     expect(mapTitles()).toEqual(['Bravo', 'Charlie (Remix)'])
     expect(screen.getAllByText(/^\+\d/)[0]).toBeInTheDocument()
   })
@@ -125,12 +164,13 @@ describe('App', () => {
     const user = await search(PLAYER)
     expect(await screen.findByText('Live Lou')).toBeInTheDocument()
     expect(screen.getByText('live')).toBeInTheDocument()
-    await screen.findByText(/sorted by biggest expected pp gain/)
+    await screen.findByText(/sorted by biggest pp gain\./)
     expect(mapTitles()).toEqual(['Alpha', 'Charlie (Remix)']) // Bravo was played live
 
-    await user.click(screen.getByRole('checkbox', { name: /Hide maps I've played/ }))
-    await waitFor(() => expect(mapTitles()).toContain('Alpha'))
+    await user.selectOptions(screen.getByLabelText('Maps'), 'improve')
+    await waitFor(() => expect(mapTitles()).toEqual(['Bravo']))
     expect(screen.getByText('Played')).toBeInTheDocument()
+    expect(screen.getByText(/260\.0pp @ 95\.1%/)).toBeInTheDocument()
   })
 
   it('finds players by name via the snapshot index', async () => {
@@ -156,8 +196,9 @@ describe('App', () => {
     try {
       await search('150')
       await screen.findByText(/synthetic sample data/)
-      await screen.findByText(/sorted by most played at this rank/)
+      await screen.findByText(/sorted by biggest pp gain/)
       expect(screen.queryByRole('link', { name: 'Install' })).toBeNull()
+      expect(screen.queryByRole('link', { name: 'Install playlist' })).toBeNull()
       expect(screen.queryByRole('link', { name: '.zip' })).toBeNull()
     } finally {
       meta.sample = false

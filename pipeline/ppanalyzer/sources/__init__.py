@@ -6,7 +6,7 @@ import statistics
 from collections.abc import Iterator
 from typing import Protocol
 
-from ..models import MapInfo, PlayerRecord
+from ..models import PlayerRecord, TopPlays
 
 DEFAULT_DECAY = 0.965
 
@@ -15,11 +15,11 @@ class Source(Protocol):
     id: str
     label: str
 
-    def iter_players(self, max_rank: int) -> Iterator[PlayerRecord]:
-        """Yield ranked players in rank order (scores left empty)."""
+    def iter_players(self, max_rank: int, min_rank: int = 1) -> Iterator[PlayerRecord]:
+        """Yield ranked players ranked min_rank..max_rank in rank order (scores left empty)."""
 
-    def fetch_top_scores(self, player_id: str, count: int) -> tuple[list[list], list[MapInfo], list[float]]:
-        """Return ``(score_rows, maps_seen, weights)`` for a player's top ranked plays."""
+    def fetch_top_scores(self, player_id: str, count: int) -> TopPlays:
+        """A player's best ``count`` ranked plays (all of them when they have fewer)."""
 
     def realm_info(self) -> dict:
         """Extra metadata about the leaderboard (realm name, advertised decay, ...)."""

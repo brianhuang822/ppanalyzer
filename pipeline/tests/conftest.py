@@ -62,6 +62,7 @@ def bl_score(lb_id: str, pp: float, accuracy: float = 0.955, weight: float = 1.0
     """A score shaped like BeatLeader's ScoreResponseWithMyScore."""
     return {
         "id": 1, "accuracy": accuracy, "pp": pp, "weight": weight, "rank": 3, "leaderboardId": lb_id,
+        "timeset": "1700000000",
         "leaderboard": {
             "id": lb_id,
             "song": {"id": song_id, "hash": "ABCDEF0123456789ABCDEF0123456789ABCDEF01", "name": f"BL {lb_id}",

@@ -1,7 +1,8 @@
 name: Deploy site
 
-# Builds the web app with the newest data from the "data-latest" release and deploys it to
-# GitHub Pages. Requires Settings -> Pages -> Source: "GitHub Actions".
+# Builds the web app with the newest data from the "data-latest" release, writes the
+# auto-updating rank-band playlists, and deploys to GitHub Pages.
+# Requires Settings -> Pages -> Source: "GitHub Actions".
 on:
   push:
     branches: [main]
@@ -31,6 +32,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - id: pages
+        uses: actions/configure-pages@v6
       - run: pip install ./pipeline
       - name: Download latest data
         env:
@@ -49,9 +52,13 @@ jobs:
           cat web/public/data/sources.json
       - run: npm ci
         working-directory: web
+      - name: Write auto-updating rank-band playlists
+        working-directory: web
+        run: npm run playlists -- --data public/data --site-url "${{ steps.pages.outputs.base_url }}"
       - run: npm run build
         working-directory: web
-      - uses: actions/configure-pages@v6
+        env:
+          BASE_PATH: ${{ steps.pages.outputs.base_path }}/
       - uses: actions/upload-pages-artifact@v4
         with:
           path: web/dist

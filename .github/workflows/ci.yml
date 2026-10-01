@@ -49,4 +49,5 @@ jobs:
           pip install ../pipeline
           python -m ppanalyzer sample --out ../raw-sample --players 2000 --maps 400
           python -m ppanalyzer build --raw ../raw-sample --out public/data/sample --shards 16
+          npm run playlists -- --data public/data --site-url https://example.github.io/ppanalyzer/
           npm run build

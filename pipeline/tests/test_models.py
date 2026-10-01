@@ -1,6 +1,12 @@
 import pytest
 
-from ppanalyzer.models import normalize_accuracy, normalize_difficulty, normalize_key, normalize_mode
+from ppanalyzer.models import (
+    normalize_accuracy,
+    normalize_difficulty,
+    normalize_key,
+    normalize_mode,
+    parse_timestamp,
+)
 
 
 @pytest.mark.parametrize("value, expected", [(0.9512, 0.9512), (95.12, 0.9512), ("97", 0.97), (None, 0.0),
@@ -31,3 +37,12 @@ def test_normalize_mode(value, expected):
                                              (None, None)])
 def test_normalize_key(value, expected):
     assert normalize_key(value) == expected
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("2025-03-01T00:00:00Z", 1740787200), ("2025-03-01T00:00:00.000+00:00", 1740787200),
+    (1740787200, 1740787200), ("1740787200", 1740787200), (1740787200123, 1740787200),
+    ("2025-03-01T00:00:00", 0), ("", 0), (None, 0), ("garbage", 0),
+])
+def test_parse_timestamp(value, expected):
+    assert parse_timestamp(value) == expected

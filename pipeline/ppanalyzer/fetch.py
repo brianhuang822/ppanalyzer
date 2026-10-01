@@ -1,21 +1,25 @@
-"""Fetch a raw snapshot: ranked players plus their top plays.
+"""Fetch a raw snapshot: ranked players plus their ranked plays.
 
 Output directory layout (everything append-only so an interrupted run can resume):
   players.jsonl       one PlayerRecord per line
   leaderboards.jsonl  one MapInfo per line (deduplicated on load)
   meta.json           source, timings, decay, realm
+
+Large snapshots are fetched in rank-range parts (``min_rank``/``max_rank``) on parallel
+machines and combined with ``merge_snapshots``.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import statistics
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .beatsaver import resolve_keys
+from .beatsaver import enrich_maps
 from .models import MapInfo, PlayerRecord
 from .sources import Source, estimate_decay
 
@@ -53,8 +57,14 @@ def load_maps(path: Path) -> dict[str, MapInfo]:
     return maps
 
 
+def write_maps(path: Path, maps: dict[str, MapInfo]) -> None:
+    with path.open("w", encoding="utf-8") as fh:
+        for info in maps.values():
+            fh.write(json.dumps(info.to_json(), ensure_ascii=False) + "\n")
+
+
 def fetch_snapshot(source: Source, out_dir: Path, max_rank: int, scores_per_player: int,
-                   workers: int = 4, resolve_beatsaver: bool = True) -> dict:
+                   workers: int = 4, min_rank: int = 1) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     players_path = out_dir / "players.jsonl"
     maps_path = out_dir / "leaderboards.jsonl"
@@ -67,8 +77,8 @@ def fetch_snapshot(source: Source, out_dir: Path, max_rank: int, scores_per_play
     if done:
         log.info("resuming: %d players already fetched", len(done))
 
-    log.info("listing %s players up to rank %d", source.label, max_rank)
-    roster = [p for p in source.iter_players(max_rank)]
+    log.info("listing %s players ranked %d-%d", source.label, min_rank, max_rank)
+    roster = list(source.iter_players(max_rank, min_rank))
     todo = [p for p in roster if p.id not in done]
     log.info("%d players in range, %d to fetch", len(roster), len(todo))
 
@@ -98,19 +108,20 @@ def fetch_snapshot(source: Source, out_dir: Path, max_rank: int, scores_per_play
             for future in finished:
                 player = pending.pop(future)
                 try:
-                    rows, maps, weights = future.result()
+                    plays = future.result()
                 except Exception as exc:
                     log.error("giving up on player %s (rank %d): %s", player.id, player.rank, exc)
                     failures.append(player.id)
                 else:
-                    player.scores = rows
+                    player.scores = plays.rows
+                    player.complete = plays.complete
                     players_fh.write(json.dumps(player.to_json(), ensure_ascii=False) + "\n")
-                    for info in maps:
+                    for info in plays.maps:
                         if info.id not in known_maps:
                             known_maps[info.id] = info
                             maps_fh.write(json.dumps(info.to_json(), ensure_ascii=False) + "\n")
-                    if len(weight_samples) < WEIGHT_SAMPLE_PLAYERS and len(weights) > 1:
-                        weight_samples.append(weights[:20])
+                    if len(weight_samples) < WEIGHT_SAMPLE_PLAYERS and len(plays.weights) > 1:
+                        weight_samples.append(plays.weights[:20])
                     fetched += 1
                     if fetched % 250 == 0:
                         rate = fetched / max(1e-9, time.monotonic() - t0)
@@ -122,27 +133,18 @@ def fetch_snapshot(source: Source, out_dir: Path, max_rank: int, scores_per_play
     if failures and len(failures) > max(10, len(todo) // 20):
         raise RuntimeError(f"{len(failures)} of {len(todo)} players failed; not writing meta")
 
-    resolved = 0
-    if resolve_beatsaver:
-        resolved = resolve_keys(known_maps)
-        if resolved:
-            # Rewrite the map file so the resolved keys persist.
-            with maps_path.open("w", encoding="utf-8") as fh:
-                for info in known_maps.values():
-                    fh.write(json.dumps(info.to_json(), ensure_ascii=False) + "\n")
-
     realm = source.realm_info()
     meta = {
         "source": source.id,
         "label": source.label,
         "realm": realm.get("realm"),
         "decay": estimate_decay(weight_samples, realm.get("advertisedDecay")),
+        "minRank": min_rank,
         "maxRank": max_rank,
         "scoresPerPlayer": scores_per_player,
         "playerCount": len(done) + fetched,
         "mapCount": len(known_maps),
         "failedPlayers": failures,
-        "resolvedKeys": resolved,
         "fetchStartedAt": started,
         "fetchedAt": now_iso(),
         "weightSamples": weight_samples,
@@ -150,3 +152,57 @@ def fetch_snapshot(source: Source, out_dir: Path, max_rank: int, scores_per_play
     meta_path.write_text(json.dumps(meta, indent=1))
     log.info("done: %d players, %d maps, decay %.4f", meta["playerCount"], meta["mapCount"], meta["decay"])
     return meta
+
+
+def merge_snapshots(parts: list[Path], out_dir: Path) -> dict:
+    """Combine rank-range parts fetched separately into one snapshot."""
+    if not parts:
+        raise ValueError("nothing to merge")
+    metas = [json.loads((part / "meta.json").read_text()) for part in parts]
+    players: dict[str, PlayerRecord] = {}
+    maps: dict[str, MapInfo] = {}
+    for part in parts:
+        for player in load_players(part / "players.jsonl"):
+            # Ranks shift while parts run; a player seen twice keeps the better rank.
+            if player.id not in players or player.rank < players[player.id].rank:
+                players[player.id] = player
+        for map_id, info in load_maps(part / "leaderboards.jsonl").items():
+            if map_id not in maps or (info.key and not maps[map_id].key):
+                maps[map_id] = info
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with (out_dir / "players.jsonl").open("w", encoding="utf-8") as fh:
+        for player in sorted(players.values(), key=lambda p: p.rank):
+            fh.write(json.dumps(player.to_json(), ensure_ascii=False) + "\n")
+    write_maps(out_dir / "leaderboards.jsonl", maps)
+
+    samples = [w for m in metas for w in m.get("weightSamples", [])]
+    decays = [m["decay"] for m in metas if m.get("decay")]
+    meta = {
+        **metas[0],
+        "decay": estimate_decay(samples, statistics.median(decays) if decays else None),
+        "minRank": min(m.get("minRank", 1) for m in metas),
+        "maxRank": max(m.get("maxRank", 0) for m in metas),
+        "playerCount": len(players),
+        "mapCount": len(maps),
+        "failedPlayers": [f for m in metas for f in m.get("failedPlayers", [])],
+        "fetchStartedAt": min(m.get("fetchStartedAt", "") for m in metas),
+        "fetchedAt": max(m.get("fetchedAt", "") for m in metas),
+        "weightSamples": samples[:WEIGHT_SAMPLE_PLAYERS],
+        "parts": len(parts),
+    }
+    (out_dir / "meta.json").write_text(json.dumps(meta, indent=1))
+    return meta
+
+
+def enrich_snapshot(raw_dir: Path) -> int:
+    """Add BeatSaver metadata to a snapshot's maps in place."""
+    maps = load_maps(raw_dir / "leaderboards.jsonl")
+    enriched = enrich_maps(maps)
+    write_maps(raw_dir / "leaderboards.jsonl", maps)
+    meta_path = raw_dir / "meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["enrichedMaps"] = enriched
+    meta_path.write_text(json.dumps(meta, indent=1))
+    log.info("BeatSaver metadata for %d of %d maps", enriched, len(maps))
+    return enriched

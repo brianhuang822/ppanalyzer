@@ -2,7 +2,7 @@
 
 Endpoints used:
   GET /players?page&limit&sort=rank             ranked, active players (100 per page max)
-  GET /players/{id}/scores?sort=top&limit=100   top plays, each with its leaderboard
+  GET /players/{id}/scores?sort=top&limit=100   ranked plays by pp, each with its leaderboard
   GET /realms                                   realm list (name, decayFactor)
 """
 
@@ -14,10 +14,12 @@ from ..http import HttpClient
 from ..models import (
     MapInfo,
     PlayerRecord,
+    TopPlays,
     normalize_accuracy,
     normalize_difficulty,
     normalize_key,
     normalize_mode,
+    parse_timestamp,
 )
 
 BASE_URL = "https://scoresaber.com/api/v2"
@@ -44,6 +46,7 @@ def parse_leaderboard(board: dict) -> MapInfo | None:
         mode=normalize_mode(difficulty.get("gameMode")),
         stars=float(realm.get("stars") or 0.0),
         cover=song.get("coverUrl", "") or "",
+        ranked_at=parse_timestamp(realm.get("rankedAt")) or None,
     )
 
 
@@ -59,7 +62,8 @@ def parse_score(item: dict) -> tuple[list, MapInfo, float] | None:
     max_score = board.get("maxScore") or 0
     fallback = (score.get("unmodifiedScore") or 0) / max_score if max_score else None
     acc = normalize_accuracy(score.get("accuracy"), fallback)
-    return [info.id, round(pp, 2), round(acc, 5)], info, float(score.get("weight") or 0.0)
+    row = [info.id, round(pp, 2), round(acc, 5), parse_timestamp(score.get("createdAt"))]
+    return row, info, float(score.get("weight") or 0.0)
 
 
 def parse_player(item: dict) -> PlayerRecord | None:
@@ -90,8 +94,9 @@ class ScoreSaberSource:
             params["realmId"] = self.realm_id
         return params
 
-    def iter_players(self, max_rank: int) -> Iterator[PlayerRecord]:
-        page = 1
+    def iter_players(self, max_rank: int, min_rank: int = 1) -> Iterator[PlayerRecord]:
+        # The ranking is sorted by rank, so jump straight to the page holding min_rank.
+        page = max(1, (min_rank - 1) // PAGE_SIZE + 1)
         while True:
             body = self.http.get_json("players", self._params(page=page, limit=PAGE_SIZE, sort="rank",
                                                               sortDirection="asc"))
@@ -100,7 +105,7 @@ class ScoreSaberSource:
                 if self._realm_name is None:
                     self._realm_name = (item.get("stats") or {}).get("realmName")
                 player = parse_player(item)
-                if player is None:
+                if player is None or player.rank < min_rank:
                     continue
                 if player.rank > max_rank:
                     return
@@ -110,35 +115,36 @@ class ScoreSaberSource:
                 return
             page += 1
 
-    def fetch_top_scores(self, player_id: str, count: int) -> tuple[list[list], list[MapInfo], list[float]]:
-        rows: list[list] = []
-        maps: list[MapInfo] = []
-        weights: list[float] = []
+    def fetch_top_scores(self, player_id: str, count: int) -> TopPlays:
+        plays = TopPlays([], [], [], complete=False)
         # Keep the page size fixed: servers compute the offset as (page - 1) * limit.
         limit = min(PAGE_SIZE, count)
         page = 1
-        while len(rows) < count:
+        while len(plays.rows) < count:
             body = self.http.get_json(f"players/{player_id}/scores",
                                       self._params(sort="top", limit=limit, page=page), allow_404=True)
             if not body:
+                plays.complete = True
                 break
             data = body.get("data") or []
             for item in data:
                 if float((item.get("score") or {}).get("pp") or 0.0) <= 0:
-                    # Top plays are sorted by pp: the first 0pp play ends the ranked list.
-                    return rows, maps, weights
+                    # Plays are sorted by pp: the first 0pp play ends the ranked list.
+                    plays.complete = True
+                    return plays.truncated(count)
                 parsed = parse_score(item)
                 if parsed is None:
                     continue
                 row, info, weight = parsed
-                rows.append(row)
-                maps.append(info)
-                weights.append(weight)
+                plays.rows.append(row)
+                plays.maps.append(info)
+                plays.weights.append(weight)
             meta = body.get("metadata") or {}
             if len(data) < limit or page >= int(meta.get("totalPages") or page):
+                plays.complete = True
                 break
             page += 1
-        return rows[:count], maps[:count], weights[:count]
+        return plays.truncated(count)
 
     def realm_info(self) -> dict:
         info: dict = {"realm": self._realm_name}

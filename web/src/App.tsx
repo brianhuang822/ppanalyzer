@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { Controls } from './components/Controls'
 import { MapList } from './components/MapList'
+import { ModelCheck } from './components/ModelCheck'
 import { PlayerCard } from './components/PlayerCard'
-import { loadBuckets, loadMaps, loadMeta, loadSources } from './lib/data'
-import { formatDate, formatInt } from './lib/format'
+import { SyncedPlaylist } from './components/SyncedPlaylist'
+import { loadBacktest, loadBuckets, loadMaps, loadMeta, loadPlaylistBands, loadSources } from './lib/data'
+import { formatDate, formatInt, formatPercent } from './lib/format'
 import { lookupPlayer, searchPlayers } from './lib/lookup'
 import { buildPlaylist, downloadPlaylist } from './lib/playlist'
 import { parseQuery } from './lib/query'
@@ -16,7 +18,7 @@ import {
   type PeerWindow,
   type SortMode,
 } from './lib/recommend'
-import type { MapInfo, Meta, PlayerHit, PlayerProfile, SourceEntry } from './lib/types'
+import type { Backtest, MapInfo, Meta, PlayerHit, PlayerProfile, PlaylistBand, SourceEntry } from './lib/types'
 import { readState, writeState, type ViewState } from './lib/urlState'
 
 const PAGE = 25
@@ -26,6 +28,10 @@ interface Dataset {
   meta: Meta
   maps: MapInfo[]
   indexById: Map<string, number>
+  /** Most common BeatSaver tags, for the style filter. */
+  tags: string[]
+  backtest: Backtest | null
+  bands: PlaylistBand[]
 }
 
 type LookupOutcome =
@@ -34,10 +40,17 @@ type LookupOutcome =
   | { kind: 'error'; message: string }
 
 const SORT_TITLES: Record<SortMode, string> = {
-  gain: 'biggest expected pp gain',
+  climb: 'biggest pp gain',
+  perMinute: 'pp gain per minute of song',
+  overweight: 'most overweighted for their star rating',
+  trending: 'most set by these players in the last month',
   popular: 'most played at this rank',
-  specific: 'most rank-specific',
-  pp: 'highest average pp',
+}
+
+function topTags(maps: MapInfo[], limit = 12): string[] {
+  const counts = new Map<string, number>()
+  for (const map of maps) for (const tag of map.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+  return [...counts].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([tag]) => tag).sort()
 }
 
 function errorMessage(error: unknown): string {
@@ -71,9 +84,13 @@ export default function App() {
   useEffect(() => {
     if (!source) return
     let cancelled = false
-    Promise.all([loadMeta(source), loadMaps(source)])
-      .then(([meta, maps]) => {
-        if (!cancelled) setDataset({ source, meta, maps, indexById: new Map(maps.map((m) => [m.id, m.index])) })
+    Promise.all([loadMeta(source), loadMaps(source), loadBacktest(source), loadPlaylistBands(source)])
+      .then(([meta, maps, backtest, bands]) => {
+        if (cancelled) return
+        setDataset({
+          source, meta, maps, backtest, bands, tags: topTags(maps),
+          indexById: new Map(maps.map((m) => [m.id, m.index])),
+        })
       })
       .catch((error) => !cancelled && setFatal(errorMessage(error)))
     return () => {
@@ -130,9 +147,9 @@ export default function App() {
   const currentPeers = peers && peers.key === peersKey ? peers : null
 
   const personal = profile !== null
-  const sort: SortMode = view.sort === 'gain' && !personal ? 'popular' : view.sort ?? (personal ? 'gain' : 'popular')
+  const sort = view.sort
   const skill = useMemo(
-    () => (profile && currentPeers && ready ? fitSkill(profile, currentPeers.stats, ready.indexById) : null),
+    () => (profile && currentPeers && ready ? fitSkill(profile, currentPeers.stats, ready.maps, ready.indexById) : null),
     [profile, currentPeers, ready],
   )
   const recs = useMemo(() => {
@@ -144,11 +161,12 @@ export default function App() {
       sort,
       profile,
       skill,
-      hidePlayed: personal && view.hidePlayed,
+      played: view.played,
       minStars: view.minStars,
       maxStars: view.maxStars,
+      tag: view.tag,
     })
-  }, [ready, currentPeers, sort, profile, skill, personal, view.hidePlayed, view.minStars, view.maxStars])
+  }, [ready, currentPeers, sort, profile, skill, view.played, view.minStars, view.maxStars, view.tag])
   const visible = recs.slice(0, limit)
 
   const update = (patch: Partial<ViewState>) => {
@@ -180,7 +198,9 @@ export default function App() {
       <header className="header">
         <div>
           <h1>PP Analyzer</h1>
-          <p className="tagline">Find the ranked Beat Saber maps that players around your rank gain pp on.</p>
+          <p className="tagline">
+            Find the ranked Beat Saber maps that give players at your rank more pp than their star rating suggests.
+          </p>
         </div>
         {sources && sources.length > 1 ? (
           <nav className="sources" aria-label="Leaderboard">
@@ -211,8 +231,11 @@ export default function App() {
       {meta ? (
         <p className="muted small">
           {meta.label} snapshot from {formatDate(meta.fetchedAt)} · {formatInt(meta.playerCount)} players ranked
-          #{formatInt(meta.minRank)}–#{formatInt(meta.maxRank)} · top {meta.scoresPerPlayer ?? 100} plays each.
-          Entering your profile lets the app skip maps you've played and rank the rest by how much pp they'd add.
+          #{formatInt(meta.minRank)}–#{formatInt(meta.maxRank)} · {meta.medianPlays
+            ? `median ${formatInt(meta.medianPlays)} ranked plays each`
+            : `top ${meta.scoresPerPlayer ?? 100} plays each`}
+          {meta.completeShare ? ` (every play for ${formatPercent(meta.completeShare, 0)} of players)` : ''}.
+          Enter your profile to skip maps you've played and get predictions calibrated to you.
         </p>
       ) : null}
 
@@ -247,7 +270,7 @@ export default function App() {
 
       {rank && meta ? (
         <>
-          <Controls state={view} sort={sort} personal={personal} onChange={update} />
+          <Controls state={view} personal={personal} tags={ready?.tags ?? []} onChange={update} />
           {peerRange?.clampedFrom ? (
             <p className="notice" role="status">
               Rank #{formatInt(peerRange.clampedFrom)} is outside this snapshot (#{formatInt(meta.minRank)}–
@@ -260,7 +283,8 @@ export default function App() {
                 <p>
                   <strong>{formatInt(recs.length)}</strong> maps from {formatInt(currentPeers.stats.players)} players
                   ranked #{formatInt(currentPeers.stats.minRank)}–#{formatInt(currentPeers.stats.maxRank)}, sorted by{' '}
-                  {SORT_TITLES[sort]}.
+                  {SORT_TITLES[sort]}
+                  {personal ? '' : ' (gains shown for a typical player here; enter your profile for yours)'}.
                 </p>
                 {visible.length ? (
                   <button type="button" className="btn" onClick={exportPlaylist}
@@ -269,12 +293,16 @@ export default function App() {
                   </button>
                 ) : null}
               </div>
+              {ready && source && !meta.sample ? (
+                <SyncedPlaylist source={source} bands={ready.bands} rank={rank} />
+              ) : null}
               {visible.length ? (
-                <MapList recs={visible} source={source ?? ''} sort={sort} personal={personal} sample={meta.sample} />
+                <MapList recs={visible} source={source ?? ''} sort={sort} personal={personal}
+                  recentDays={meta.recentDays ?? 30} sample={meta.sample} />
               ) : (
                 <p className="notice">
-                  {sort === 'gain'
-                    ? 'No map is predicted to raise your pp at this range. Try a wider range or "players just above me".'
+                  {sort === 'climb' || sort === 'perMinute' || view.played === 'improve'
+                    ? 'No map is predicted to raise your pp in this range. Try a wider range or "players just above me".'
                     : 'No maps match these filters.'}
                 </p>
               )}
@@ -294,27 +322,36 @@ export default function App() {
         <summary>How does this work?</summary>
         <ul>
           <li>
-            A scheduled job pulls every ranked player's top plays from the {meta?.label ?? 'leaderboard'} API and groups
-            players by rank. For your rank it shows the maps the players around you have in their top plays.
+            A weekly job pulls every ranked player's ranked plays from the {meta?.label ?? 'leaderboard'} API and groups
+            players by rank.
           </li>
           <li>
-            <strong>Expected pp gain</strong> (with your profile): your predicted pp on a map is the peers' average pp on
-            it, scaled by how you compare with them on maps you both played. The gain is how much your total would rise
-            after the 0.965-per-position weighting both leaderboards use, including maps you could improve.
+            <strong>Overweighted</strong>: for each group the job learns the accuracy players there typically get at
+            each star rating, and how each player compares with that. A map is overweighted when players do better on it
+            than their skill and its star rating predict. Because pp rises steeply with accuracy, a small accuracy edge
+            is a big pp edge, and the badge shows it in pp.
           </li>
           <li>
-            <strong>Most rank-specific</strong> favours maps that are unusually common at your rank compared with all
-            ranks, so everyone's universal favourites don't crowd the list.
+            <strong>Fastest climb</strong>: your predicted accuracy is the typical accuracy at the map's stars, plus your
+            offset, plus the map's overweight, plus how you do on maps with the same style tags. That is turned into pp
+            with the leaderboard's curve, and the gain is how much your <em>total</em> rises after the
+            0.965-per-position weighting. Without a profile it uses a typical player at your rank.
+          </li>
+          <li>
+            <strong>Being farmed now</strong>: maps players in your range set scores on in the last month.{' '}
+            <strong>Per minute</strong> divides the gain by song length, since short maps allow more attempts.
           </li>
           <li>
             <strong>Install</strong> uses the <code>beatsaver://</code> one-click link (enable OneClick for BeatSaver in
             ModAssistant or BSManager). <strong>.zip</strong> downloads the map directly from BeatSaver.
           </li>
           <li>
-            Correlation, not causation: these maps are where similar players already score well, which is a strong hint
-            but no guarantee they suit you.
+            The edge is real only if it holds up, so each week the job checks last week's predictions against the
+            scores players actually set (below, once two snapshots exist). Rating teams also reweight maps, so
+            yesterday's farm map can stop paying.
           </li>
         </ul>
+        {ready?.backtest ? <ModelCheck backtest={ready.backtest} /> : null}
       </details>
 
       <footer className="footer muted small">

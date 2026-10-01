@@ -1,5 +1,17 @@
+import { normalizeBucket, parseMaps } from './parse'
 import { shardOf } from './shard'
-import type { Bucket, MapInfo, Meta, PlayerHit, PlayerProfile, PlayerShard, SourceEntry, Table } from './types'
+import type {
+  Backtest,
+  Bucket,
+  MapInfo,
+  Meta,
+  PlayerHit,
+  PlayerProfile,
+  PlayerShard,
+  PlaylistBand,
+  SourceEntry,
+  Table,
+} from './types'
 
 /** Static data lives next to the app: <base>/data/<source>/... */
 export const DATA_ROOT = `${import.meta.env.BASE_URL}data`
@@ -33,37 +45,12 @@ export function loadMeta(source: string): Promise<Meta> {
   return getJson<Meta>(`${source}/meta.json`)
 }
 
-type MapRow = [string, string, string | null, string, string, string, string, string, string, number, string,
-  number, number]
-
 export async function loadMaps(source: string): Promise<MapInfo[]> {
-  const table = await getJson<Table<MapRow>>(`${source}/maps.json`)
-  const at = (name: string) => table.fields.indexOf(name)
-  const col = {
-    id: at('id'), hash: at('hash'), key: at('key'), name: at('name'), subName: at('subName'),
-    artist: at('artist'), mapper: at('mapper'), difficulty: at('difficulty'), mode: at('mode'),
-    stars: at('stars'), cover: at('cover'), globalCount: at('globalCount'), globalWeight: at('globalWeight'),
-  }
-  return table.rows.map((row, index) => ({
-    index,
-    id: String(row[col.id]),
-    hash: String(row[col.hash] ?? ''),
-    key: (row[col.key] as string | null) ?? null,
-    name: String(row[col.name] ?? ''),
-    subName: String(row[col.subName] ?? ''),
-    artist: String(row[col.artist] ?? ''),
-    mapper: String(row[col.mapper] ?? ''),
-    difficulty: String(row[col.difficulty] ?? ''),
-    mode: String(row[col.mode] ?? 'Standard'),
-    stars: Number(row[col.stars] ?? 0),
-    cover: String(row[col.cover] ?? ''),
-    globalCount: Number(row[col.globalCount] ?? 0),
-    globalWeight: Number(row[col.globalWeight] ?? 0),
-  }))
+  return parseMaps(await getJson<Table<unknown[]>>(`${source}/maps.json`))
 }
 
-export function loadBucket(source: string, bucket: number): Promise<Bucket> {
-  return getJson<Bucket>(`${source}/buckets/${bucket}.json`)
+export async function loadBucket(source: string, bucket: number): Promise<Bucket> {
+  return normalizeBucket(await getJson<Bucket>(`${source}/buckets/${bucket}.json`))
 }
 
 export async function loadBuckets(source: string, buckets: number[]): Promise<Bucket[]> {
@@ -91,6 +78,28 @@ export async function loadSnapshotPlayer(source: string, meta: Meta, maps: MapIn
       .filter(([index]) => maps[index] !== undefined)
       .map(([index, pp, acc]) => ({ mapId: maps[index].id, pp, acc })),
   }
+}
+
+/** Optional files: missing ones (older data, first week) just hide their feature. */
+export async function loadBacktest(source: string): Promise<Backtest | null> {
+  try {
+    return await getJson<Backtest>(`${source}/backtest.json`)
+  } catch {
+    return null
+  }
+}
+
+export async function loadPlaylistBands(source: string): Promise<PlaylistBand[]> {
+  try {
+    return (await getJson<{ bands: PlaylistBand[] }>(`${source}/playlists/index.json`)).bands
+  } catch {
+    return []
+  }
+}
+
+/** Absolute URL of a data file, for links that leave the browser (e.g. bsplaylist://). */
+export function dataUrl(path: string): string {
+  return new URL(`${DATA_ROOT}/${path}`, window.location.href).toString()
 }
 
 export async function searchSnapshotPlayers(source: string, name: string, limit = 8): Promise<PlayerHit[]> {

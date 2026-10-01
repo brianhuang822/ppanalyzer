@@ -1,4 +1,11 @@
-import { difficultyLabel, formatInt, formatPercent, formatPP } from '../lib/format'
+import {
+  difficultyLabel,
+  formatDuration,
+  formatInt,
+  formatPercent,
+  formatPP,
+  formatSignedPercent,
+} from '../lib/format'
 import { beatSaverUrl, downloadUrl, leaderboardUrl, oneClickUrl, previewUrl } from '../lib/links'
 import type { Recommendation, SortMode } from '../lib/recommend'
 import type { SourceId } from '../lib/types'
@@ -8,9 +15,13 @@ interface Props {
   source: SourceId
   sort: SortMode
   personal: boolean
+  recentDays: number
   /** Synthetic data: its hashes/keys are fake, so offer no install or download links. */
   sample?: boolean
 }
+
+/** Overweight below this is noise, not worth a badge. */
+const OVERWEIGHT_BADGE = 0.03
 
 function Cover({ url, name }: { url: string; name: string }) {
   if (!url) return <div className="cover cover-empty" aria-hidden="true">{name.slice(0, 1)}</div>
@@ -26,7 +37,7 @@ function Stat({ label, value, title, className }: { label: string; value: string
   )
 }
 
-export function MapList({ recs, source, sort, personal, sample = false }: Props) {
+export function MapList({ recs, source, sort, personal, recentDays, sample = false }: Props) {
   return (
     <ol className="maps">
       {recs.map((rec, i) => {
@@ -36,6 +47,8 @@ export function MapList({ recs, source, sort, personal, sample = false }: Props)
         const preview = sample ? null : previewUrl(map)
         const board = leaderboardUrl(source, map)
         const title = map.subName ? `${map.name} ${map.subName}` : map.name
+        const length = formatDuration(map.duration)
+        const who = personal ? "You'd get" : 'Typical here'
         return (
           <li className="map" key={map.id}>
             <span className="map-pos">{i + 1}</span>
@@ -52,29 +65,36 @@ export function MapList({ recs, source, sort, personal, sample = false }: Props)
               <div className="map-tags">
                 <span className={`diff diff-${map.difficulty}`}>{difficultyLabel(map.difficulty, map.mode)}</span>
                 <span className="stars" title="Star rating">★ {map.stars.toFixed(2)}</span>
+                {rec.overweightPct >= OVERWEIGHT_BADGE && rec.overweightPP >= 1 ? (
+                  <span className="badge-ow" title="Players at this rank get this much more pp per play on it than on a typical map of the same star rating">
+                    Overweighted +{formatInt(rec.overweightPP)}pp ({formatSignedPercent(rec.overweightPct, 0)})
+                  </span>
+                ) : null}
+                {rec.recent >= 3 ? (
+                  <span className="badge-hot" title={`Players in this range who set their score on it in the last ${recentDays} days`}>
+                    🔥 {formatInt(rec.recent)} recent
+                  </span>
+                ) : null}
+                {rec.newlyRanked ? <span className="badge-new" title={`Ranked in the last ${recentDays} days: few players have farmed it yet`}>Newly ranked</span> : null}
                 {rec.mine ? <span className="tag-played">Played</span> : null}
+                {length ? <span className="meta-chip" title="Song length">{length}</span> : null}
+                {map.njs ? <span className="meta-chip" title="Note jump speed">{map.njs} NJS</span> : null}
+                {map.tags.slice(0, 3).map((tag) => <span key={tag} className="meta-chip">{tag}</span>)}
+                {map.mods.map((mod) => <span key={mod} className="badge-mod">Needs {mod}</span>)}
               </div>
             </div>
             <dl className="map-stats">
               <Stat label="Peers" value={`${formatPercent(rec.share, 0)} (${formatInt(rec.count)})`}
-                title="Share of players in your range with this map in their top plays" />
-              <Stat label="Avg pp" value={formatPP(rec.avgPP)} title="Mean pp these players get on it" />
-              <Stat label="Avg acc" value={formatPercent(rec.avgAcc)} />
-              {sort === 'specific' || sort === 'popular' ? (
-                <Stat label={sort === 'specific' ? 'Rank-specific' : 'Weighted'}
-                  value={sort === 'specific' ? `${rec.lift.toFixed(1)}×` : rec.popularity.toFixed(2)}
-                  title={sort === 'specific'
-                    ? 'How much more common this map is at your rank than across all ranks'
-                    : 'Appearances per player, weighted 0.965^position like pp'} />
-              ) : null}
-              {personal && rec.predictedPP !== undefined ? (
-                <Stat label="You'd get" value={`~${formatPP(rec.predictedPP, 0)}`}
-                  title={rec.predictedAcc ? `Predicted accuracy ${formatPercent(rec.predictedAcc)}` : undefined} />
-              ) : null}
-              {rec.mine ? <Stat label="Your best" value={formatPP(rec.mine.pp)} /> : null}
-              {personal && rec.gain !== undefined ? (
-                <Stat className="gain" label="Total gain" value={`+${formatPP(rec.gain, 2)}`}
-                  title="Estimated increase in your total pp after the 0.965 weighting" />
+                title="Share of players in your range with this map among their ranked plays" />
+              <Stat label="Their acc" value={formatPercent(rec.avgAcc)} title="Average accuracy of those players" />
+              <Stat label={who} value={`~${formatPP(rec.predictedPP, 0)} @ ${formatPercent(rec.predictedAcc)}`}
+                title="Predicted from typical accuracy at this star rating, the map's overweight and (with a profile) your skill and style" />
+              {rec.mine ? <Stat label="Your best" value={`${formatPP(rec.mine.pp)} @ ${formatPercent(rec.mine.acc)}`} /> : null}
+              <Stat className="gain" label={personal ? 'Your total' : 'Total'} value={`+${formatPP(rec.gain, 2)}`}
+                title="Increase in total pp after the 0.965-per-position weighting" />
+              {sort === 'perMinute' ? (
+                <Stat className="gain" label="Per minute" value={`+${formatPP(rec.gainPerMinute, 2)}`}
+                  title="Total pp gain per minute of song: shorter maps let you retry more" />
               ) : null}
             </dl>
             <div className="map-actions">

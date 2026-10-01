@@ -28,3 +28,15 @@ export function formatDate(iso: string | null): string {
   const date = new Date(iso)
   return Number.isNaN(date.getTime()) ? iso : date.toISOString().slice(0, 10)
 }
+
+export function formatDuration(seconds: number | null): string | null {
+  if (!seconds || seconds <= 0) return null
+  const total = Math.round(seconds)
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
+}
+
+/** "+1.2%" / "-0.4%" for fractions such as 0.012. */
+export function formatSignedPercent(fraction: number, digits = 1): string {
+  const value = (fraction * 100).toFixed(digits)
+  return fraction >= 0 ? `+${value}%` : `${value}%`
+}

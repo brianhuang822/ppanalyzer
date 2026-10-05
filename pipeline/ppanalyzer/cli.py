@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     fetch.add_argument("--source", choices=["scoresaber", "beatleader"], required=True)
     fetch.add_argument("--out", type=Path, required=True, help="raw snapshot directory")
     fetch.add_argument("--min-rank", type=int, default=1)
-    fetch.add_argument("--max-rank", type=int, default=30000)
+    fetch.add_argument("--max-rank", type=int, default=40000)
     fetch.add_argument("--scores", type=int, default=100,
                        help="ranked plays per player, best first (more = less survivorship bias)")
     fetch.add_argument("--rate", type=float, default=5.0, help="requests per second")

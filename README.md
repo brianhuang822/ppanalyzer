@@ -163,9 +163,10 @@ python -m ppanalyzer build --raw raw/sample --out web/public/data/sample
 
 # Real data (needs network access to the APIs). Fetch in rank-range parts (in parallel on several
 # machines if you like), merge, add BeatSaver metadata, build. Re-running fetch resumes where it stopped.
-python -m ppanalyzer fetch --source scoresaber --out raw/ss-1 --min-rank 1 --max-rank 15000 --scores 500
-python -m ppanalyzer fetch --source scoresaber --out raw/ss-2 --min-rank 15001 --max-rank 30000 --scores 500
-python -m ppanalyzer merge --out raw/scoresaber raw/ss-1 raw/ss-2
+python -m ppanalyzer fetch --source scoresaber --out raw/ss-1 --min-rank 1 --max-rank 13333 --scores 500
+python -m ppanalyzer fetch --source scoresaber --out raw/ss-2 --min-rank 13334 --max-rank 26666 --scores 500
+python -m ppanalyzer fetch --source scoresaber --out raw/ss-3 --min-rank 26667 --max-rank 40000 --scores 500
+python -m ppanalyzer merge --out raw/scoresaber raw/ss-1 raw/ss-2 raw/ss-3
 python -m ppanalyzer enrich --raw raw/scoresaber
 python -m ppanalyzer build --raw raw/scoresaber --out web/public/data/scoresaber
 
@@ -196,8 +197,8 @@ data/legacy Original 2021 dataset
 1. **Settings → Pages → Build and deployment → Source: GitHub Actions.** The old site was served from `docs/`,
    which no longer exists.
 2. **Actions → Refresh data → Run workflow.** It fetches both leaderboards, each split into rank-range parts on
-   parallel runners (default 2 parts × 15,000 players × up to 500 plays; roughly 2–4 hours per part at 5
-   requests/s, inside the 5.5-hour job timeout; raise `parts` if one times out).
+   parallel runners (default: ranks 1–40,000 in 3 parts of about 13,300 players × up to 500 plays; roughly
+   2–4 hours per part at 5 requests/s, inside the 5.5-hour job timeout; raise `parts` if one times out).
    It then merges, enriches, builds, runs the backtest, publishes the `data-latest` release and deploys. After that
    it runs every Monday at 06:17 UTC. Inputs let you change the rank range, play depth and number of parts.
 3. Pushes to `main` that touch `web/` or `pipeline/` redeploy with the latest published data. Until the first

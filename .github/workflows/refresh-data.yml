@@ -16,13 +16,13 @@ on:
         default: both
       max_rank:
         description: Fetch players ranked 1..max_rank
-        default: "30000"
+        default: "40000"
       scores:
         description: Ranked plays per player, best first (deeper = less survivorship bias, slower)
         default: "500"
       parts:
-        description: Rank-range parts fetched in parallel per leaderboard
-        default: "2"
+        description: Rank-range parts fetched in parallel per leaderboard (keep each under ~15k players)
+        default: "3"
 
 permissions:
   contents: write
@@ -47,8 +47,8 @@ jobs:
       - id: plan
         env:
           SOURCES: ${{ inputs.sources || 'both' }}
-          MAX_RANK: ${{ inputs.max_rank || '30000' }}
-          PARTS: ${{ inputs.parts || '2' }}
+          MAX_RANK: ${{ inputs.max_rank || '40000' }}
+          PARTS: ${{ inputs.parts || '3' }}
         run: |
           python3 - <<'EOF' >> "$GITHUB_OUTPUT"
           import json, os
@@ -128,7 +128,7 @@ jobs:
           path: parts
       - name: Merge parts and add BeatSaver metadata
         env:
-          PARTS: ${{ inputs.parts || '2' }}
+          PARTS: ${{ inputs.parts || '3' }}
         run: |
           found=$(ls -d parts/*/ | wc -l)
           if [ "$found" -ne "$PARTS" ]; then
